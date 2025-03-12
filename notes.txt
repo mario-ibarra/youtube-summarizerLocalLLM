@@ -1,0 +1,140 @@
+Okay, I understand. You've got the YouTube summarizer working, but the processing time for longer videos (over 20 minutes) is too slow, taking around 10 minutes to get a response. You don't want to save the vector database to disk (which we've addressed), and now the focus is on speeding up the response time.
+
+Here's a breakdown of the problem, why it's happening, and how we can significantly improve performance:
+
+Why It's Slow
+
+Transcript Processing:
+
+Loading the Transcript: The YoutubeLoader has to download the entire transcript from YouTube. For longer videos, this transcript will be very large.
+Splitting into Chunks: The RecursiveCharacterTextSplitter then breaks this long transcript into smaller chunks. The more text, the more chunks, and this step takes time.
+Embedding Each Chunk: The OllamaEmbeddings model has to create a vector embedding for each of these chunks. This is the most computationally intensive step. It involves running the embedding model on every single chunk of text. This is directly proportional to the number of chunks.
+Building the FAISS Index: The FAISS.from_documents call then builds an index from all of these embeddings. The more chunks you have, the longer this takes.
+Similarity Search:
+
+Embedding the Query: When you ask a question, the query also has to be embedded.
+Finding Similar Chunks: FAISS then performs a similarity search across all the pre-computed embeddings to find the most relevant chunks. This can be fast, but it still takes time.
+LLM Response Generation:
+
+Prompt Construction: The prompt you're creating is quite large (because it includes all the relevant document content).
+LLM Inference: The LLM (phi4 in this case) has to process the entire prompt and generate a response. The more text, the longer this takes.
+Strategies for Speeding Up the Process
+
+Here's what we can do to significantly reduce the response time:
+
+Reduce the Number of Chunks:
+
+Increase chunk_size: The biggest factor in the number of chunks is the chunk_size parameter in RecursiveCharacterTextSplitter. Increasing this value will result in fewer, but larger, chunks.
+Reduce chunk_overlap: The chunk_overlap is also important. Smaller overlap reduces the total amount of text being processed.
+Optimize the similarity_search (k value):
+
+Reduce k: The k parameter in similarity_search dictates how many results it returns. If you only need a few relevant chunks, reduce k (e.g., to 2 or 3).
+Optimize the Prompt:
+
+Summarize the Docs (Advanced): Before sending to the main LLM, you could use a separate LLM (maybe a smaller, faster one) to summarize the docs_page_content. Then you send the summary instead of the raw, long text.
+Change the model:
+
+Phi-4 is a good option but there are lighter models that might be more efficient.
+Code Changes
+
+Here's the updated langchain_helper.py with these optimizations:
+
+ python 
+from langchain_ollama.llms import OllamaLLM
+from langchain_community.document_loaders import YoutubeLoader
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.prompts import PromptTemplate
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_ollama import OllamaEmbeddings
+from langchain_community.vectorstores import FAISS
+
+# 1. Define the LLM
+llm = OllamaLLM(model="phi4")  # Or your preferred model
+
+# Instantiate the class embeddings WITH the model name
+embeddings = OllamaEmbeddings(model="phi4")  # Change: added the parameter `model`
+
+
+def create_vector_db_from_youtube(video_url: str):
+    """Creates a vector database from a YouTube video transcript.
+
+    Args:
+        video_url: The URL of the YouTube video.
+
+    Returns:
+        A FAISS vector database.
+    """
+    loader = YoutubeLoader.from_youtube_url(video_url)
+    transcript = loader.load()
+
+    # --- Optimization 1: Larger chunk size, smaller overlap ---
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1500, chunk_overlap=100) # increase the chunk_size
+    docs = text_splitter.split_documents(transcript)
+
+    db = FAISS.from_documents(docs, embeddings)
+    return db
+
+
+def get_response_from_query(db, query, k=2): # Change: reduced k
+    """Gets a response to a query based on the vector database.
+
+    Args:
+        db: The FAISS vector database.
+        query: The user's question.
+        k: The number of nearest neighbors to consider.
+
+    Returns:
+        The LLM's response to the query.
+    """
+    # --- Optimization 2: Reduced k in similarity_search ---
+    docs = db.similarity_search(query, k=k)
+    docs_page_content = " ".join([d.page_content for d in docs])
+
+    llm = OllamaLLM(model="phi4")
+    prompt = PromptTemplate(
+        input_variables=["question", "docs"],
+        template="""
+        You are a helpful Youtube assistant that can answer questions about videos based on the video's transcript.
+        
+        Answer the following question: {question}
+        By searching the following video transcript: {docs}
+        
+        Only use the factual information from the transcript to answer the question.
+
+        if you feel like you don't have enough information to answer the question, say "I don't know".
+        
+        Your answers should be verbose and detailed.
+        """,
+    )
+
+    chain = prompt | llm
+    response = chain.invoke({"question": query, "docs": docs_page_content})
+
+    return response
+Explanation of Changes:
+
+create_vector_db_from_youtube:
+chunk_size=1500: Increased the chunk size. This significantly reduces the number of chunks.
+chunk_overlap=100: Lowering the overlap, reducing duplicate information.
+get_response_from_query:
+k=2: Changed k to 2, meaning we'll only use the 2 most relevant chunks.
+Further Improvements (More Advanced)
+
+Summarize the Chunks (Before Sending to Main LLM):
+
+Create a new summarize_chunks function that takes docs_page_content and uses a smaller, faster LLM to generate a summary.
+Pass this summary to the final LLM instead of the whole docs_page_content.
+Caching:
+
+Implement a simple caching system (e.g., using a Python dictionary) to store the results of create_vector_db_from_youtube for specific video URLs. This way, if the user asks about the same video again, you don't have to re-process the transcript.
+Change the model: Test other models, there are a lot of open-source options in Ollama.
+
+Testing and Iteration
+
+Try the modified code with long videos.
+Start with chunk_size=1500 and k=2. If the responses are too short, you can increase k. If you are missing some information, you can decrease the chunk_size.
+Iterate and find the optimal values for your needs.
+By implementing these changes, you should see a very noticeable improvement in response times, even for long videos, without compromising too much on the quality of the answers.
+
+Rate this answer: 
+Context Sources (3)
