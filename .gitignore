@@ -1,0 +1,8 @@
+.venv
+*.faiss
+*.pyc
+__pycache__/
+.idea/
+.vscode/
+*.env
+.notes.txt
